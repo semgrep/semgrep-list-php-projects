@@ -1,0 +1,72 @@
+# Tests on every push and pull request, and proves the image builds.
+# Also called by release.yml, so a release cannot ship what CI did not pass.
+#
+# Every action is pinned to a full commit SHA (org policy): a tag is mutable.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install (exactly what uv.lock pins)
+        run: uv sync --frozen --extra dev
+      - name: Test
+        run: uv run --frozen pytest -q
+      - name: The entry point runs
+        run: uv run --frozen semgrep-list-php-projects --version
+
+  image:
+    name: Image builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: semgrep-list-php-projects:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The image runs, and refuses to run without a token
+        run: |
+          docker run --rm semgrep-list-php-projects:ci --version
+          set +e
+          docker run --rm semgrep-list-php-projects:ci </dev/null 2>stderr.txt
+          code=$?
+          set -e
+          cat stderr.txt
+          test "$code" -eq 2
+          grep -q "no API token found" stderr.txt
