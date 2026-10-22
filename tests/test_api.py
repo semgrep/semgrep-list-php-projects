@@ -65,6 +65,23 @@ class TestToken:
         env = {"SEMGREP_APP_TOKEN": " tok "}
         assert sg.get_token(env, settings_file=missing, interactive=False) == "tok"
 
+    def test_resolve_token_reports_the_source(self, tmp_path):
+        settings = tmp_path / "settings.yml"
+        settings.write_text("api_token: from_file\n")
+        env = {"SEMGREP_APP_TOKEN": "from_env"}
+        assert sg.resolve_token(env, settings_file=settings, interactive=False) == (
+            "from_file", sg.SOURCE_SETTINGS)
+        assert sg.resolve_token(env, settings_file=tmp_path / "absent.yml",
+                                interactive=False) == ("from_env", sg.SOURCE_ENV)
+        assert sg.resolve_token({}, settings_file=tmp_path / "absent.yml",
+                                prompt=lambda _: "typed", interactive=True) == (
+            "typed", sg.SOURCE_PROMPT)
+
+    def test_dev_null_as_the_settings_file_disables_it(self):
+        # The documented way to make the environment variable win.
+        assert sg.get_token({"SEMGREP_APP_TOKEN": "env"}, settings_file="/dev/null",
+                            interactive=False) == "env"
+
     def test_prompts_on_a_terminal(self, tmp_path):
         prompts = []
 

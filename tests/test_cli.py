@@ -70,8 +70,8 @@ def fake_api(monkeypatch):
     acme/cms  no recent full scan, Composer deps   -> decided yes by composer
     acme/old  no recent full scan, no Composer     -> undecided: findings walk
     """
-    calls = {"walked": None, "stats": []}
-    monkeypatch.setattr(api, "get_token", lambda: "tok")
+    calls = {"walked": None, "stats": [], "source": api.SOURCE_ENV}
+    monkeypatch.setattr(api, "resolve_token", lambda: ("tok", calls["source"]))
     monkeypatch.setattr(api, "current_deployment",
                         lambda token, base_url: {"id": 1234, "name": "Acme"})
     monkeypatch.setattr(api, "list_projects", lambda deployment_id, token, base_url: PROJECTS)
@@ -228,10 +228,44 @@ class TestMain:
         code, out, err = _run(capsys, [])
         assert code == 2 and out == ""
 
+    def test_the_token_source_is_logged_but_never_the_token(self, fake_api, capsys):
+        _, out, err = _run(capsys, [])
+        assert "token: $SEMGREP_APP_TOKEN" in err
+        assert "tok" not in err.replace("token", "")
+
+    def test_a_login_token_is_named_in_the_log(self, fake_api, capsys):
+        fake_api["source"] = api.SOURCE_SETTINGS
+        _, out, err = _run(capsys, [])
+        assert "written by `semgrep login`" in err
+
+    def test_a_refused_signal_hints_at_login_token_access_once(
+            self, fake_api, monkeypatch, capsys):
+        # Measured live: a `semgrep login` token gets 404 on one deployment's
+        # v1 endpoints where a Web API token gets 200. Say so, once.
+        fake_api["source"] = api.SOURCE_SETTINGS
+
+        def gone(*args, **kwargs):
+            raise api.SemgrepError("HTTP 404", status=404)
+        monkeypatch.setattr(api, "latest_full_scan", gone)
+        monkeypatch.setattr(api, "composer_repositories", gone)
+        code, out, err = _run(capsys, [])
+        assert code == 0
+        assert err.count("semgrep logout") == 1
+        assert "Web API scope" in err
+
+    def test_a_refused_signal_with_an_environment_token_gets_the_general_hint(
+            self, fake_api, monkeypatch, capsys):
+        def gone(*args, **kwargs):
+            raise api.SemgrepError("HTTP 404", status=404)
+        monkeypatch.setattr(api, "latest_full_scan", gone)
+        _, out, err = _run(capsys, [])
+        assert "not granted Web API access" in err
+        assert "semgrep logout" not in err
+
     def test_api_errors_exit_2_without_a_traceback(self, monkeypatch, capsys):
         def no_token():
             raise api.SemgrepError("no API token found")
-        monkeypatch.setattr(api, "get_token", no_token)
+        monkeypatch.setattr(api, "resolve_token", no_token)
         code, out, err = _run(capsys, [])
         assert code == 2 and out == ""
         assert "error: no API token found" in err

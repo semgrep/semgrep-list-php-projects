@@ -137,13 +137,28 @@ def settings_token(path: str | os.PathLike[str]) -> str | None:
     return None
 
 
-def get_token(
+def settings_file_path(env: dict[str, str] | None = None) -> str:
+    env = env if env is not None else os.environ
+    return env.get(SETTINGS_FILE_ENV) or DEFAULT_SETTINGS_FILE
+
+
+# Where the token came from. The CLI reports it, because which org a run
+# queries depends on it, and because a `semgrep login` token is not granted
+# Web API access on every deployment (measured 2026-10-21: the same login token
+# gets 200 on one deployment's v1 endpoints and 404 on another's, where a
+# token created with the Web API scope gets 200).
+SOURCE_SETTINGS = "settings"
+SOURCE_ENV = "environment"
+SOURCE_PROMPT = "prompt"
+
+
+def resolve_token(
     env: dict[str, str] | None = None,
     settings_file: str | os.PathLike[str] | None = None,
     prompt: Callable[[str], str] | None = None,
     interactive: bool | None = None,
-) -> str:
-    """The API token, from the first of these that has one:
+) -> tuple[str, str]:
+    """(token, source), from the first of these that has one:
 
     1. the semgrep CLI's settings file, `~/.semgrep/settings.yml`, which
        `semgrep login` writes (SEMGREP_SETTINGS_FILE overrides the path);
@@ -158,13 +173,13 @@ def get_token(
     """
     env = env if env is not None else os.environ
     if settings_file is None:
-        settings_file = env.get(SETTINGS_FILE_ENV) or DEFAULT_SETTINGS_FILE
+        settings_file = settings_file_path(env)
     token = settings_token(settings_file)
     if token:
-        return token
+        return token, SOURCE_SETTINGS
     token = (env.get(TOKEN_ENV) or "").strip()
     if token:
-        return token
+        return token, SOURCE_ENV
     if interactive is None:
         interactive = sys.stdin.isatty()
     if not interactive:
@@ -178,7 +193,17 @@ def get_token(
     token = (prompt or getpass.getpass)("Semgrep API token (Web API scope; hidden): ").strip()
     if not token:
         raise SemgrepError("no token entered")
-    return token
+    return token, SOURCE_PROMPT
+
+
+def get_token(
+    env: dict[str, str] | None = None,
+    settings_file: str | os.PathLike[str] | None = None,
+    prompt: Callable[[str], str] | None = None,
+    interactive: bool | None = None,
+) -> str:
+    """The token alone; see `resolve_token`."""
+    return resolve_token(env, settings_file, prompt, interactive)[0]
 
 
 def _retry_delay(attempt: int, retry_after: str | None) -> float:
