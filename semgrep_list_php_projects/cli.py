@@ -70,9 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="semgrep-list-php-projects",
         description="List the Semgrep projects that contain PHP.",
-        epilog=f"The API token comes from {api.DEFAULT_SETTINGS_FILE} (written by "
-               f"`semgrep login`), then ${api.TOKEN_ENV}, then a hidden prompt. It "
-               "needs the Web API scope and is never accepted as an argument.",
+        epilog=f"The API token comes from ${api.TOKEN_ENV}, then "
+               f"{api.DEFAULT_SETTINGS_FILE} (written by `semgrep login`), then a "
+               "hidden prompt. It needs the Web API scope and is never accepted as "
+               "an argument.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--signals", default=",".join(SIGNALS), type=_signals,

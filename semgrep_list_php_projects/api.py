@@ -145,10 +145,13 @@ def get_token(
 ) -> str:
     """The API token, from the first of these that has one:
 
-    1. the semgrep CLI's settings file, `~/.semgrep/settings.yml`, which
+    1. the SEMGREP_APP_TOKEN environment variable;
+    2. the semgrep CLI's settings file, `~/.semgrep/settings.yml`, which
        `semgrep login` writes (SEMGREP_SETTINGS_FILE overrides the path);
-    2. the SEMGREP_APP_TOKEN environment variable;
     3. a prompt on the terminal, with input hidden.
+
+    The environment wins, as is usual, so a token exported for one run
+    overrides a login without touching the settings file.
 
     Without a terminal there is nothing to prompt, so that is an error. The
     token is never accepted as a command-line argument: it would land in shell
@@ -157,21 +160,21 @@ def get_token(
     `settings_file`, `prompt` and `interactive` exist for tests.
     """
     env = env if env is not None else os.environ
+    token = (env.get(TOKEN_ENV) or "").strip()
+    if token:
+        return token
     if settings_file is None:
         settings_file = env.get(SETTINGS_FILE_ENV) or DEFAULT_SETTINGS_FILE
     token = settings_token(settings_file)
-    if token:
-        return token
-    token = (env.get(TOKEN_ENV) or "").strip()
     if token:
         return token
     if interactive is None:
         interactive = sys.stdin.isatty()
     if not interactive:
         raise SemgrepError(
-            f"no API token found: {settings_file} has no api_token and {TOKEN_ENV} "
-            "is not set. Run `semgrep login`, or export a token with the Web API "
-            "scope. It is never accepted as a command-line argument."
+            f"no API token found: {TOKEN_ENV} is not set and {settings_file} has "
+            "no api_token. Export a token with the Web API scope, or run "
+            "`semgrep login`. It is never accepted as a command-line argument."
         )
     # getpass reads from the terminal, not stdin, and hides the input, so this
     # works even when stdout is redirected to a file.

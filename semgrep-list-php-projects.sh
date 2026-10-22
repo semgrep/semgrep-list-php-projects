@@ -5,10 +5,10 @@
 #   ./semgrep-list-php-projects.sh --format json
 #
 # The token comes from the first of these that has one:
-#   1. ~/.semgrep/settings.yml, written by `semgrep login` (mounted read-only;
-#      SEMGREP_SETTINGS_FILE overrides the path),
-#   2. $SEMGREP_APP_TOKEN, forwarded by name so it never appears on a command
+#   1. $SEMGREP_APP_TOKEN, forwarded by name so it never appears on a command
 #      line where `ps` would show it,
+#   2. ~/.semgrep/settings.yml, written by `semgrep login` (mounted read-only;
+#      SEMGREP_SETTINGS_FILE overrides the path),
 #   3. a hidden prompt, when run from a terminal.
 #
 # The container needs no other filesystem access: results go to stdout.
@@ -22,13 +22,15 @@ MOUNTED=/run/semgrep/settings.yml
 # The image goes before the user's arguments; docker options go before the image.
 set -- "$IMAGE" "$@"
 
-if [ -f "$SETTINGS" ] && grep -Eq '^[[:space:]]*api_token[[:space:]]*:[[:space:]]*[^[:space:]#]' "$SETTINGS"; then
+if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
+  : # forwarded by name below; the settings file is not mounted
+elif [ -f "$SETTINGS" ] && grep -Eq '^[[:space:]]*api_token[[:space:]]*:[[:space:]]*[^[:space:]#]' "$SETTINGS"; then
   set -- -v "$SETTINGS:$MOUNTED:ro" -e "SEMGREP_SETTINGS_FILE=$MOUNTED" "$@"
-elif [ -z "${SEMGREP_APP_TOKEN:-}" ]; then
+else
   if [ ! -t 0 ]; then
-    echo "semgrep-list-php-projects: no API token: $SETTINGS has no api_token and" \
-         "SEMGREP_APP_TOKEN is not set. Run 'semgrep login', or export a token" \
-         "with the Web API scope." >&2
+    echo "semgrep-list-php-projects: no API token: SEMGREP_APP_TOKEN is not set and" \
+         "$SETTINGS has no api_token. Export a token with the Web API scope, or" \
+         "run 'semgrep login'." >&2
     exit 2
   fi
   # The container's stdin is a pipe, so the prompt happens here. The token goes

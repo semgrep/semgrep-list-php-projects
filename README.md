@@ -123,9 +123,10 @@ The PyPI release carries PEP 740 attestations, shown on each file at
 The tool looks for a Semgrep API token in this order and uses the first it
 finds:
 
-1. **`~/.semgrep/settings.yml`**, which `semgrep login` writes. Set
+1. **`SEMGREP_APP_TOKEN`** in the environment. It wins over the settings
+   file, so you can run once with another token without logging out.
+2. **`~/.semgrep/settings.yml`**, which `semgrep login` writes. Set
    `SEMGREP_SETTINGS_FILE` to use another path, as with the semgrep CLI.
-2. **`SEMGREP_APP_TOKEN`** in the environment.
 3. **A prompt**, with input hidden, when run from a terminal. Without a
    terminal (CI, a pipe) there is nothing to prompt, so that is an error.
 
@@ -137,8 +138,9 @@ The token needs the **Web API** scope. The token `semgrep login` creates has
 it. A CI-only token (the `agent_cli` scope) gets HTTP 401 here, and the error
 says so.
 
-In Docker, the wrapper script mounts the settings file read-only and forwards
-`SEMGREP_APP_TOKEN` by name. Without the wrapper, pass one of:
+In Docker, the wrapper script forwards `SEMGREP_APP_TOKEN` by name when it is
+set, and otherwise mounts the settings file read-only. Without the wrapper,
+pass one of:
 
 ```bash
 docker run --rm -v ~/.semgrep/settings.yml:/run/semgrep/settings.yml:ro \
