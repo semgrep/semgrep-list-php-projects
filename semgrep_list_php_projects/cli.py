@@ -5,10 +5,10 @@ dependency is one more thing for the people running this to vet.
 
 Results go to stdout and progress to stderr, so the output can be piped.
 
-Exit codes: 0 the lookup ran (whether or not anything matched, and even if a
-signal was skipped because its product is not enabled), 2 it could not run or
-did not finish -- bad arguments, no token, or an API failure that survived
-retries.
+Exit codes: 0 the lookup ran (whether or not anything matched, and even if
+`composer` was skipped because Supply Chain is not enabled), 2 it could not run
+or did not finish -- bad arguments, no token, a refused token, or an API
+failure that survived retries.
 """
 
 from __future__ import annotations
@@ -31,6 +31,13 @@ OUTPUT_FORMATS = ("text", "json", "csv")
 # yet measured against a deployment without Supply Chain; widen it if the live
 # API turns out to use another status.
 UNAVAILABLE_STATUSES = {403, 404}
+# The signals a deployment may lack the product for. Only Supply Chain is
+# optional here: without it the dependency endpoint refuses, and the other
+# signals still answer. The same statuses from `scans` or `findings` mean the
+# token is refused (measured 2026-10-21, see TOKEN_HINT), and skipping `scans`
+# would widen the findings walk to every project and miss the PHP projects that
+# have no findings, so there they stop the run.
+SKIPPABLE_SIGNALS = {"composer"}
 # Requests in flight at once for the per-project scan lookups: a search and a
 # scan read per project, so two requests each. Each is cheap, but for a large org
 # tens of thousands arrive together; the cap keeps that from becoming a load
@@ -210,7 +217,7 @@ def _token_source(source: str) -> str:
     }[source]
 
 
-# Printed once when a signal is refused with 403 or 404. Measured 2026-10-21: a
+# Said when a signal is refused with 403 or 404. Measured 2026-10-21: a
 # `semgrep login` token is not granted Web API access on every deployment, and
 # the endpoints then answer 404, the same as a product that is not enabled.
 TOKEN_HINT = (
@@ -222,6 +229,29 @@ LOGIN_TOKEN_HINT = (
     "token Web API access. Create a token with the Web API scope (Settings > Tokens) "
     f"and export it as {api.TOKEN_ENV}; it overrides the login without logging out."
 )
+# Said when the token is refused with 401 or 403 and it came from the
+# environment while the settings file also holds one: SEMGREP_APP_TOKEN is the
+# variable `semgrep ci` reads too, so an exported CI token silently replaces a
+# working login.
+ENV_OVERRIDE_HINT = (
+    f"note: ${api.TOKEN_ENV} is set and overrides the token in {{settings}}; "
+    f"unset {api.TOKEN_ENV} to use your `semgrep login` token."
+)
+
+
+def _refusal_hint(source: str) -> str:
+    return LOGIN_TOKEN_HINT if source == api.SOURCE_SETTINGS else TOKEN_HINT
+
+
+def _with_override_hint(exc: api.SemgrepError, source: str) -> api.SemgrepError:
+    """`exc`, plus ENV_OVERRIDE_HINT when an environment token displaced a login."""
+    if exc.status not in (401, 403) or source != api.SOURCE_ENV:
+        return exc
+    settings = api.settings_file_path()
+    if not api.settings_token(settings):
+        return exc
+    return api.SemgrepError(
+        f"{exc}\n{ENV_OVERRIDE_HINT.format(settings=settings)}", status=exc.status)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -229,6 +259,13 @@ def run(args: argparse.Namespace) -> int:
     # The source decides which org a run queries, so a reader of the log should
     # never have to guess. The token itself is never logged.
     _log(f"token: {_token_source(source)}")
+    try:
+        return _lookup(args, token, source)
+    except api.SemgrepError as exc:
+        raise _with_override_hint(exc, source) from exc
+
+
+def _lookup(args: argparse.Namespace, token: str, source: str) -> int:
     deployment = api.current_deployment(token, base_url=args.base_url)
     deployment_id, name = int(deployment["id"]), str(deployment["name"])
 
@@ -263,18 +300,20 @@ def run(args: argparse.Namespace) -> int:
 
     # Order matters: each signal narrows what the findings walk has to cover.
     for signal in [s for s in SIGNALS if s in args.signals]:
-        # Not every deployment has every product: without Supply Chain the
-        # dependency endpoint refuses. One missing product must not discard the
-        # other signals' answers, so that is a warning. Anything else -- a walk
-        # that died on page 250 after its retries -- would make the list look
-        # complete when it is not, so it stops the run.
+        # Not every deployment has Supply Chain: without it the dependency
+        # endpoint refuses. One missing product must not discard the other
+        # signals' answers, so that is a warning. Anything else -- a refused
+        # token, or a walk that died on page 250 after its retries -- would
+        # make the list look complete when it is not, so it stops the run.
         try:
             run_signal(signal)
         except api.SemgrepError as exc:
             if exc.status not in UNAVAILABLE_STATUSES:
                 raise
-            if not skipped:
-                _log(LOGIN_TOKEN_HINT if source == api.SOURCE_SETTINGS else TOKEN_HINT)
+            if signal not in SKIPPABLE_SIGNALS:
+                raise api.SemgrepError(
+                    f"{signal}: {exc}\n{_refusal_hint(source)}", status=exc.status) from exc
+            _log(_refusal_hint(source))
             skipped[signal] = str(exc)
             _log(f"{signal}: skipped, {exc}")
             continue

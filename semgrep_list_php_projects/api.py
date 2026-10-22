@@ -45,8 +45,9 @@ because only the v1 scan object carries per-language statistics:
                nonsense term then returned every finding in the deployment.
                The file extension is checked here instead.
 
-Not every customer has Supply Chain, so the CLI treats a signal whose product is
-not enabled as a warning and answers from the others.
+Not every customer has Supply Chain, so the CLI treats a refused `composer` as
+a warning and answers from the other signals. A refused `scans` or `findings`
+stops the run: the list would otherwise look complete when it is not.
 
 Every endpoint takes the Web API token (`SemgrepWebToken` in the spec). The
 token `semgrep login` stores has that scope; a CI-only (`agent_cli`) token gets

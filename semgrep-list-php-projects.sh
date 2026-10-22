@@ -22,7 +22,14 @@ MOUNTED=/run/semgrep/settings.yml
 # The image goes before the user's arguments; docker options go before the image.
 set -- "$IMAGE" "$@"
 
-if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
+# Set means "has a non-blank character", as the tool itself reads it: a
+# whitespace-only value falls through to the settings file there too.
+case "${SEMGREP_APP_TOKEN:-}" in
+  *[![:space:]]*) token_set=1 ;;
+  *) token_set= ;;
+esac
+
+if [ -n "$token_set" ]; then
   : # forwarded by name below; the settings file is not mounted
 elif [ -f "$SETTINGS" ] && grep -Eq '^[[:space:]]*api_token[[:space:]]*:[[:space:]]*[^[:space:]#]' "$SETTINGS"; then
   set -- -v "$SETTINGS:$MOUNTED:ro" -e "SEMGREP_SETTINGS_FILE=$MOUNTED" "$@"

@@ -62,12 +62,14 @@ confidence. Dropping it would make a PHP project with no `composer.lock` and no
 Code findings invisible. The v1 search accepts the v2 project ids. When v2
 exposes per-language statistics, these two calls are the only thing to move.
 
-**Not every customer has Supply Chain.** If a signal's endpoint refuses with
-HTTP 403 or 404, the tool prints a warning, records it under `signalsSkipped`
-and answers from the others. The same statuses also appear when the token is
-not granted Web API access on the deployment (see [The token](#the-token)), so
-the warning says both. Any other failure stops the run with exit `2`. A list
-built from half a findings walk would look complete when it is not.
+**Not every customer has Supply Chain.** If the `composer` endpoint refuses
+with HTTP 403 or 404, the tool prints a warning, records it under
+`signalsSkipped` and answers from the other signals. The same statuses also
+appear when the token is not granted Web API access on the deployment (see
+[The token](#the-token)), so the warning says both. From `scans` or `findings`
+those statuses stop the run with exit `2`, as does any other failure: a list
+built without `scans`, or from half a findings walk, would look complete when
+it is not.
 
 **A project no signal finds is not reported**, even if it contains PHP. If you
 need certainty for a project that is not on the list, check its repository.
@@ -143,13 +145,18 @@ scope) gets HTTP 401 here, and the error says so.
 2026-10-21: the same login token reaches every endpoint on a recently created
 deployment and gets HTTP 404 from the v1 and scan endpoints on an older one,
 where a token created with the Web API scope gets 200. When that happens the
-tool skips the `scans` signal, says so, and prints a hint. The fix is a token
+tool stops at the `scans` signal with exit `2` and says why. The fix is a token
 with the Web API scope from Settings > Tokens in the Semgrep app, exported as
 `SEMGREP_APP_TOKEN`. It overrides the login, so there is no need to log out:
 
 ```bash
 SEMGREP_APP_TOKEN=... semgrep-list-php-projects
 ```
+
+The reverse also happens: `SEMGREP_APP_TOKEN` is the variable `semgrep ci`
+reads, so a CI token left exported in a shell overrides a working login and
+every call gets HTTP 401. When the token came from the environment and the
+settings file also holds one, the error says to unset the variable.
 
 Every run starts by saying where its token came from (never the token), so a
 log always shows which login an org list belongs to.
