@@ -1,46 +1,57 @@
-"""Semgrep API: which projects contain PHP.
+"""Semgrep API v2: which projects contain PHP.
 
-The public API has no "languages" field on a project -- neither the project
-listing nor the project detail carries one (checked against the published
-OpenAPI spec, semgrep.dev/api/v1/public_v1.openapi.yaml, on 2026-10-21). So PHP
-is detected from three signals the API does expose, cheapest and most direct
-first:
+Written against the v2 OpenAPI spec (semgrep.dev/api/v2/openapi.yaml) and
+checked against the live API on 2026-10-21. Nothing in v2 says what languages a
+project contains: not the project (`protos.projects.v2.Project`), not the
+branch, and not the scan (`protos.scan.v2.Scan` carries findings counts and
+enabled products, but no per-language parse statistics). So PHP is detected
+from three signals, most direct first. The first still needs two v1 endpoints,
+because only the v1 scan object carries per-language statistics:
 
     scans      POST /api/v1/deployments/{id}/scans/search  (full, Code, completed)
                GET  /api/v1/deployments/{id}/scan/{scanId}
                -> per-language parse statistics from each project's latest full
                Code scan: did Semgrep parse PHP files in this repository? A full
                scan, because a diff scan only sees the files a change touched.
-               Verified against the live API on 2026-10-21: `stats.parse_rate`
-               maps language ids (`php`, `python`, `js`, ...) to
-               {num_targets, targets_parsed, num_bytes, bytes_parsed}. The search
-               takes one repository_id -- no list, no deployment-wide search --
-               and returns newest first, so this is two small requests per
-               project. Covers only projects with a
-               full scan in the last 30 days, the search endpoint's window.
+               `stats.parse_rate` maps language ids (`php`, `python`, ...) to
+               {num_targets, targets_parsed, num_bytes, bytes_parsed}. The
+               search takes one repository_id (the v2 project id works) and
+               returns newest first, so this is two small requests per project.
+               Covers only projects with a full scan in the last 30 days, the
+               search endpoint's window. This is the one signal that can say
+               "no PHP" with confidence, which spares the findings walk.
 
-    composer   POST /api/v1/deployments/{id}/dependencies/repositories
+    composer   POST /api/sca/deployments/{id}/repositories
                with dependencyFilter.ecosystem = ["composer"]
                -> projects whose Supply Chain scan found Composer packages.
                One cheap, paginated call. Misses PHP with no composer.lock, and
                projects that are not scanned with Supply Chain.
 
-    findings   GET  /api/v1/deployments/{slug}/findings?issue_type=sast
-               -> projects with at least one Code finding in a PHP file.
-               The expensive one: offset-paginated over large pages. So it is a
-               fallback, run only for the projects the other signals left
-               undecided, and filtered to their ids in small batches so no query
-               pages deep into the whole deployment's findings.
+    findings   POST /api/agent/deployments/{id}/issues
+               with issueTypes = ["ISSUE_TYPE_SAST"]
+               -> projects with at least one Code finding in a PHP file, or
+               from a `php.*` rule. Cursor-paginated over large pages, so it
+               is the expensive one: it runs only for the projects the other
+               signals left undecided, filtered to their ids in batches so no
+               query pages deep into the whole deployment's findings. The
+               endpoint insists on a branch filter; `onPrimaryBranch` keeps it
+               to each project's default branch. Every status is included
+               (open, fixed, ignored, removed): a finding that was once in a
+               PHP file is still evidence the project contains PHP.
+
+               The filter's `filePaths` field is not used. It is a fuzzy
+               text search with typo tolerance, and measured on 2026-10-21 it
+               is silently ignored whenever a `status` filter is also set: a
+               nonsense term then returned every finding in the deployment.
+               The file extension is checked here instead.
 
 Not every customer has Supply Chain, so the CLI treats a signal whose product is
 not enabled as a warning and answers from the others.
 
-All of these are v1 endpoints, so the token needs the **Web API** scope. The
-token `semgrep login` stores has it; a CI-only (`agent_cli`) token gets 401.
-
-The token comes from the first of: the semgrep CLI's settings file
-(`~/.semgrep/settings.yml`, written by `semgrep login`), the SEMGREP_APP_TOKEN
-environment variable, or a hidden prompt on the terminal. See `get_token`.
+Every endpoint takes the Web API token (`SemgrepWebToken` in the spec). The
+token `semgrep login` stores has that scope; a CI-only (`agent_cli`) token gets
+401. The token comes from the semgrep settings file, then SEMGREP_APP_TOKEN,
+then a hidden prompt: see `get_token`.
 
 Uses stdlib urllib rather than a HTTP client library, and a line scan rather
 than a YAML parser for the settings file: this runs with an API token, so every
@@ -78,12 +89,15 @@ _SETTINGS_TOKEN_LINE = re.compile(r"""^\s*api_token\s*:\s*['"]?([^'"#\s]+)['"]?\
 PHP_EXTENSIONS = (".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phps")
 COMPOSER = "composer"
 
-FINDINGS_PAGE_SIZE = 3000  # the API maximum
-# Repository ids per findings query. Bounds both the URL length (ids are repeated
-# query parameters) and how deep any one query's offset pagination goes.
-FINDINGS_REPOSITORY_BATCH = 100
+ISSUE_TYPE_CODE = "ISSUE_TYPE_SAST"
+# Every scan-controlled status the API defines. The default is narrower.
+ISSUE_STATUSES = ("ISSUE_STATUS_UNRESOLVED", "ISSUE_STATUS_FIXED",
+                  "ISSUE_STATUS_MUTED", "ISSUE_STATUS_REMOVED")
+ISSUES_PAGE_SIZE = 3000  # the documented maximum
+# Project ids per issues query. Bounds how deep any one query's pagination goes.
+ISSUES_REPOSITORY_BATCH = 100
 REPOSITORIES_PAGE_SIZE = 100  # the API maximum
-PROJECTS_PAGE_SIZE = 100
+PROJECTS_PAGE_SIZE = 3000  # the API maximum
 # A runaway pagination loop (an API that keeps returning the same page) would
 # otherwise spin forever with a token in the environment.
 MAX_PAGES = 10_000
@@ -240,33 +254,46 @@ def _request(
 
 
 def current_deployment(token: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
-    """The deployment this token acts on, with its numeric `id` and `slug`.
+    """The deployment this token acts on: its numeric `id` and `name`.
 
-    Some endpoints take the id and some the slug; a token belongs to exactly one
-    deployment, so neither is a flag.
+    GET /api/v2/deployments. A token belongs to exactly one deployment, so the
+    deployment is never a flag.
     """
-    response = _request(f"{base_url}/api/v1/deployments", token)
+    response = _request(f"{base_url}/api/v2/deployments", token)
     deployments = response.get("deployments") or []
-    if len(deployments) != 1 or not deployments[0].get("id") or not deployments[0].get("slug"):
+    if len(deployments) != 1 or not deployments[0].get("id") or not deployments[0].get("name"):
         raise SemgrepError(
             f"expected exactly one deployment for this token, got {len(deployments)}; "
-            f"check that {TOKEN_ENV} is valid"
+            f"check that the token is valid"
         )
-    return deployments[0]
+    deployment = deployments[0]
+    return {"id": int(deployment["id"]), "name": str(deployment["name"])}
 
 
-def list_projects(slug: str, token: str, base_url: str = DEFAULT_BASE_URL) -> list[dict[str, Any]]:
-    """Every non-archived project in the deployment, each with `id` and `name`."""
+def list_projects(
+    deployment_id: int, token: str, base_url: str = DEFAULT_BASE_URL
+) -> list[dict[str, Any]]:
+    """Every non-archived project in the deployment, each with `id` and `name`.
+
+    POST /api/v2/deployments/{id}/projects/list, following `pageToken` until
+    it comes back empty. Ids are strings on the wire (int64) and ints here.
+    """
+    url = f"{base_url}/api/v2/deployments/{deployment_id}/projects/list"
     projects: list[dict[str, Any]] = []
-    for page in range(MAX_PAGES):
-        response = _request(
-            f"{base_url}/api/v1/deployments/{urllib.parse.quote(slug, safe='')}/projects", token,
-            params={"page": page, "page_size": PROJECTS_PAGE_SIZE},
-        )
-        batch = response.get("projects") or []
-        projects.extend(batch)
-        if len(batch) < PROJECTS_PAGE_SIZE:
+    page_token = ""
+    for _ in range(MAX_PAGES):
+        body: dict[str, Any] = {"pageSize": PROJECTS_PAGE_SIZE}
+        if page_token:
+            body["pageToken"] = page_token
+        response = _request(url, token, method="POST", body=body)
+        for project in response.get("projects") or []:
+            if project.get("isSemgrepArchived") or project.get("id") in (None, ""):
+                continue
+            projects.append({"id": int(project["id"]), "name": str(project.get("name") or "")})
+        next_token = str(response.get("pageToken") or "")
+        if not next_token or next_token == page_token:
             return projects
+        page_token = next_token
     raise SemgrepError(f"project listing did not end after {MAX_PAGES} pages")
 
 
@@ -274,7 +301,7 @@ def composer_repositories(
     deployment_id: int, token: str, base_url: str = DEFAULT_BASE_URL
 ) -> dict[str, int]:
     """Project name -> number of Composer dependencies, for every project that has any."""
-    url = f"{base_url}/api/v1/deployments/{deployment_id}/dependencies/repositories"
+    url = f"{base_url}/api/sca/deployments/{deployment_id}/repositories"
     found: dict[str, int] = {}
     cursor: int | None = None
     for _ in range(MAX_PAGES):
@@ -300,73 +327,78 @@ def composer_repositories(
     raise SemgrepError(f"dependency repository listing did not end after {MAX_PAGES} pages")
 
 
-def is_php_finding(finding: dict[str, Any]) -> bool:
-    """True when a Code finding is in a PHP file, or comes from a PHP rule.
+def is_php_issue(issue: dict[str, Any]) -> bool:
+    """True when a Code issue is in a PHP file, or comes from a PHP rule.
 
     The rule check covers PHP embedded in files with other extensions; registry
-    rule names start with their language (`php.lang.security...`).
+    rule paths start with their language (`php.lang.security...`).
     """
-    path = str((finding.get("location") or {}).get("file_path") or "").lower()
+    path = str(issue.get("filePath") or "").lower()
     if path.endswith(PHP_EXTENSIONS):
         return True
-    rule = finding.get("rule") or {}
-    rule_name = str(rule.get("name") or finding.get("rule_name") or "")
-    return rule_name.startswith("php.")
+    rule = str(issue.get("rulePath") or issue.get("ruleId") or "")
+    return rule.startswith("php.")
 
 
-def _findings_page(response: dict[str, Any]) -> list[dict[str, Any]]:
-    # The live API returns a flat `findings`; the published spec nests it under
-    # `sastFindings`. Accept both so either shape works.
-    if "findings" in response:
-        return response.get("findings") or []
-    return (response.get("sastFindings") or {}).get("findings") or []
-
-
-def php_findings(
-    slug: str,
+def php_issues(
+    deployment_id: int,
     token: str,
     base_url: str = DEFAULT_BASE_URL,
     repository_ids: Iterable[int] | None = None,
     progress=None,
 ) -> Counter[str]:
-    """Project name -> number of Code findings in PHP, for every project with any.
+    """Project name -> number of Code issues in PHP, for every project with any.
 
     `repository_ids=None` walks the whole deployment; a list restricts the walk
-    to those projects, queried in batches of FINDINGS_REPOSITORY_BATCH. An empty
+    to those projects, queried in batches of ISSUES_REPOSITORY_BATCH. An empty
     list makes no request at all.
 
-    Only the project name is kept from each finding. Code snippets, messages and
+    Only the project name is kept from each issue. Code snippets, messages and
     file paths are customer data and never leave this function.
     """
-    url = f"{base_url}/api/v1/deployments/{urllib.parse.quote(slug, safe='')}/findings"
-    params: dict[str, Any] = {"issue_type": "sast", "dedup": "true",
-                              "page_size": FINDINGS_PAGE_SIZE}
+    url = f"{base_url}/api/agent/deployments/{deployment_id}/issues"
+    base_filter: dict[str, Any] = {"onPrimaryBranch": True, "status": list(ISSUE_STATUSES)}
     if repository_ids is None:
-        batches: list[dict[str, Any]] = [params]
+        filters: list[dict[str, Any]] = [base_filter]
     else:
-        ids = list(dict.fromkeys(int(i) for i in repository_ids))
-        batches = [{**params, "repository_ids": ids[i:i + FINDINGS_REPOSITORY_BATCH]}
-                   for i in range(0, len(ids), FINDINGS_REPOSITORY_BATCH)]
+        ids = list(dict.fromkeys(str(int(i)) for i in repository_ids))
+        filters = [{**base_filter, "repositoryIds": ids[i:i + ISSUES_REPOSITORY_BATCH]}
+                   for i in range(0, len(ids), ISSUES_REPOSITORY_BATCH)]
 
     counts: Counter[str] = Counter()
     seen = 0
-    for batch_params in batches:
-        for page in range(MAX_PAGES):
-            batch = _findings_page(_request(url, token, params={**batch_params, "page": page}))
-            for finding in batch:
-                if is_php_finding(finding):
-                    name = str((finding.get("repository") or {}).get("name") or "").strip()
+    for batch_filter in filters:
+        cursor = ""
+        for _ in range(MAX_PAGES):
+            body: dict[str, Any] = {
+                "deploymentId": str(deployment_id),
+                "issueTypes": [ISSUE_TYPE_CODE],
+                "limit": ISSUES_PAGE_SIZE,
+                "filter": batch_filter,
+            }
+            if cursor:
+                body["cursor"] = cursor
+            response = _request(url, token, method="POST", body=body)
+            page = response.get("issues") or []
+            for summary in page:
+                issue = summary.get("issue") or summary
+                if is_php_issue(issue):
+                    name = str((issue.get("repository") or {}).get("name") or "").strip()
                     if name:
                         counts[name] += 1
-            seen += len(batch)
+            seen += len(page)
             if progress:
                 progress(seen)
-            if len(batch) < FINDINGS_PAGE_SIZE:
+            next_cursor = str(response.get("cursor") or "")
+            if not page or not next_cursor or next_cursor == cursor:
                 break
+            cursor = next_cursor
         else:
-            raise SemgrepError(f"findings listing did not end after {MAX_PAGES} pages")
+            raise SemgrepError(f"issue listing did not end after {MAX_PAGES} pages")
     return counts
 
+
+# scans: the v1 endpoints, kept because v2 has no per-language statistics.
 
 def latest_full_scan(
     deployment_id: int,

@@ -3,8 +3,7 @@
 argparse rather than a CLI framework: one command does not need one, and every
 dependency is one more thing for the people running this to vet.
 
-Results go to stdout and progress to stderr, so the output can be piped -- for
-example into `semgrep-sbom export --projects-file`.
+Results go to stdout and progress to stderr, so the output can be piped.
 
 Exit codes: 0 the lookup ran (whether or not anything matched, and even if a
 signal was skipped because its product is not enabled), 2 it could not run or
@@ -204,10 +203,10 @@ def _write(rows: list[dict[str, Any]], output: str, meta: dict[str, Any]) -> Non
 def run(args: argparse.Namespace) -> int:
     token = api.get_token()
     deployment = api.current_deployment(token, base_url=args.base_url)
-    deployment_id, slug = int(deployment["id"]), str(deployment["slug"])
+    deployment_id, name = int(deployment["id"]), str(deployment["name"])
 
-    projects = api.list_projects(slug, token, base_url=args.base_url)
-    _log(f"deployment {slug}: {len(projects)} project(s)")
+    projects = api.list_projects(deployment_id, token, base_url=args.base_url)
+    _log(f"deployment {name}: {len(projects)} project(s)")
 
     results: dict[str, dict[str, int]] = {}
     skipped: dict[str, str] = {}
@@ -231,8 +230,8 @@ def run(args: argparse.Namespace) -> int:
                          if p.get("id") is not None and str(p.get("name")) not in decided]
             walked = len(undecided)
             _log(f"findings: walking {walked} undecided project(s)")
-            results[signal] = dict(api.php_findings(
-                slug, token, base_url=args.base_url, repository_ids=undecided,
+            results[signal] = dict(api.php_issues(
+                deployment_id, token, base_url=args.base_url, repository_ids=undecided,
                 progress=lambda seen: _log(f"findings: {seen} read")))
 
     # Order matters: each signal narrows what the findings walk has to cover.
@@ -259,7 +258,7 @@ def run(args: argparse.Namespace) -> int:
          + (f" (signals skipped: {', '.join(skipped)})" if skipped else ""))
     _write(rows, args.output, {
         "tool": f"semgrep-list-php-projects {__version__}",
-        "deployment": slug,
+        "deployment": name,
         "signals": list(results),
         "signalsSkipped": skipped,
         "projectsVisible": len(projects),
