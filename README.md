@@ -64,8 +64,10 @@ exposes per-language statistics, these two calls are the only thing to move.
 
 **Not every customer has Supply Chain.** If a signal's endpoint refuses with
 HTTP 403 or 404, the tool prints a warning, records it under `signalsSkipped`
-and answers from the other. Any other failure stops the run with exit `2`. A
-list built from half a findings walk would look complete when it is not.
+and answers from the others. The same statuses also appear when the token is
+not granted Web API access on the deployment (see [The token](#the-token)), so
+the warning says both. Any other failure stops the run with exit `2`. A list
+built from half a findings walk would look complete when it is not.
 
 **A project no signal finds is not reported**, even if it contains PHP. If you
 need certainty for a project that is not on the list, check its repository.
@@ -134,9 +136,23 @@ The token is never accepted as a command-line argument, so it stays out of
 shell history and `ps`. It is never logged or written to disk. The token decides
 the deployment, so you never pass one.
 
-The token needs the **Web API** scope. The token `semgrep login` creates has
-it. A CI-only token (the `agent_cli` scope) gets HTTP 401 here, and the error
-says so.
+The token needs the **Web API** scope. A CI-only token (the `agent_cli`
+scope) gets HTTP 401 here, and the error says so.
+
+**The `semgrep login` token is not enough on every deployment.** Measured on
+2026-10-21: the same login token reaches every endpoint on a recently created
+deployment and gets HTTP 404 from the v1 and scan endpoints on an older one,
+where a token created with the Web API scope gets 200. When that happens the
+tool skips the `scans` signal, says so, and prints a hint. The fix is a token
+with the Web API scope from Settings > Tokens in the Semgrep app, exported as
+`SEMGREP_APP_TOKEN`. It overrides the login, so there is no need to log out:
+
+```bash
+SEMGREP_APP_TOKEN=... semgrep-list-php-projects
+```
+
+Every run starts by saying where its token came from (never the token), so a
+log always shows which login an org list belongs to.
 
 In Docker, the wrapper script forwards `SEMGREP_APP_TOKEN` by name when it is
 set, and otherwise mounts the settings file read-only. Without the wrapper,

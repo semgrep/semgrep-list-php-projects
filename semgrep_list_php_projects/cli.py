@@ -201,8 +201,34 @@ def _write(rows: list[dict[str, Any]], output: str, meta: dict[str, Any]) -> Non
                              row["composerDependencies"], row["phpFindings"]])
 
 
+def _token_source(source: str) -> str:
+    """Where the token came from, for the log. Never the token."""
+    return {
+        api.SOURCE_SETTINGS: f"{api.settings_file_path()} (written by `semgrep login`)",
+        api.SOURCE_ENV: f"${api.TOKEN_ENV}",
+        api.SOURCE_PROMPT: "the prompt",
+    }[source]
+
+
+# Printed once when a signal is refused with 403 or 404. Measured 2026-10-21: a
+# `semgrep login` token is not granted Web API access on every deployment, and
+# the endpoints then answer 404, the same as a product that is not enabled.
+TOKEN_HINT = (
+    "note: HTTP 403 or 404 here means the product is not enabled on this deployment, "
+    "or that this token is not granted Web API access on it."
+)
+LOGIN_TOKEN_HINT = (
+    "note: this token came from `semgrep login`, and some deployments do not grant that "
+    "token Web API access. Create a token with the Web API scope (Settings > Tokens) "
+    f"and export it as {api.TOKEN_ENV}; it overrides the login without logging out."
+)
+
+
 def run(args: argparse.Namespace) -> int:
-    token = api.get_token()
+    token, source = api.resolve_token()
+    # The source decides which org a run queries, so a reader of the log should
+    # never have to guess. The token itself is never logged.
+    _log(f"token: {_token_source(source)}")
     deployment = api.current_deployment(token, base_url=args.base_url)
     deployment_id, name = int(deployment["id"]), str(deployment["name"])
 
@@ -247,6 +273,8 @@ def run(args: argparse.Namespace) -> int:
         except api.SemgrepError as exc:
             if exc.status not in UNAVAILABLE_STATUSES:
                 raise
+            if not skipped:
+                _log(LOGIN_TOKEN_HINT if source == api.SOURCE_SETTINGS else TOKEN_HINT)
             skipped[signal] = str(exc)
             _log(f"{signal}: skipped, {exc}")
             continue
