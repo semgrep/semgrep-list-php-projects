@@ -7,6 +7,8 @@ Lists the Semgrep projects that contain PHP, from the terminal, using the
 [Semgrep API v2](https://semgrep.dev/api/v2/openapi.yaml) wherever v2 can
 answer, and two v1 scan endpoints where only v1 can.
 
+![semgrep-list-php-projects running in a terminal](docs/demo.gif)
+
 ```bash
 semgrep login                                    # or: export SEMGREP_APP_TOKEN=...
 uvx semgrep-list-php-projects > php-projects.txt
