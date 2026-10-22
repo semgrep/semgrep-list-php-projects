@@ -347,3 +347,78 @@ class TestRetries:
         with pytest.raises(sg.SemgrepError) as excinfo:
             sg._request("https://x/y", "sg_secret", sleep=lambda _: None)
         assert "sg_secret" not in str(excinfo.value)
+
+
+class TestLatestFullScan:
+    def test_asks_v1_for_one_completed_full_code_scan_of_one_repository(self, monkeypatch):
+        calls = _pages(monkeypatch, [{"scans": []}])
+        sg.latest_full_scan(1234, 7, "tok")
+        body = calls[0]["body"]
+        # v1 on purpose: the v2 scan object has no per-language statistics.
+        assert calls[0]["url"].endswith("/api/v1/deployments/1234/scans/search")
+        # The live API refuses a list here, and refuses a search without one.
+        assert body["repository_id"] == 7
+        assert body["is_full_scan"] is True, "the live API rejects the spec's integer"
+        assert body["is_partial_scan"] is False
+        assert body["statuses"] == ["SCAN_STATUS_COMPLETED"]
+        assert body["products"] == ["PRODUCT_SAST"]
+        # Results are newest first (measured live), so one is enough.
+        assert body["limit"] == 1
+
+    def test_returns_the_scan(self, monkeypatch):
+        _pages(monkeypatch, [{"scans": [{"id": "3", "repository_id": "7"}], "cursor": "c"}])
+        assert sg.latest_full_scan(1, 7, "tok")["id"] == "3"
+
+    def test_none_without_a_recent_full_scan(self, monkeypatch):
+        _pages(monkeypatch, [{"scans": []}])
+        assert sg.latest_full_scan(1, 7, "tok") is None
+
+    def test_makes_exactly_one_request_even_with_a_cursor(self, monkeypatch):
+        calls = _pages(monkeypatch, [{"scans": [{"id": "3"}], "cursor": "more"}])
+        sg.latest_full_scan(1, 7, "tok")
+        assert len(calls) == 1
+
+
+class TestScanLanguages:
+    # Shape measured on the live API, 2026-10-21.
+    LIVE = {"engine_requested": "PRO", "errors": [], "findings": 3,
+            "findings_by_product": {}, "lockfile_scan_info": {}, "total_time": 12.5,
+            "unsupported_exts": {},
+            "parse_rate": {"html": {"bytes_parsed": 10, "num_bytes": 10,
+                                    "num_targets": 2, "targets_parsed": 2},
+                           "php": {"bytes_parsed": 900, "num_bytes": 1000,
+                                   "num_targets": 31, "targets_parsed": 30}}}
+
+    def test_reads_the_live_shape(self):
+        assert sg.php_files(sg.scan_languages(self.LIVE)) == 31
+
+    def test_reads_semgrep_ci_parse_rate(self):
+        stats = {"parse_rate": {"PHP": {"num_targets": 12, "targets_parsed": 11},
+                                "python": {"num_targets": 3}}}
+        languages = sg.scan_languages(stats)
+        assert languages == {"php": 12, "python": 3}
+        assert sg.php_files(languages) == 12
+
+    def test_camel_case_spelling(self):
+        assert sg.scan_languages({"parseRate": {"php": {"numTargets": 4}}}) == {"php": 4}
+
+    def test_a_listed_language_without_a_count_still_counts(self):
+        assert sg.php_files(sg.scan_languages({"parse_rate": {"php": 0.98}})) == 1
+
+    def test_zero_php_targets_is_no_php(self):
+        assert sg.php_files(sg.scan_languages({"parse_rate": {"php": {"num_targets": 0}}})) == 0
+
+    def test_no_language_data_is_none_not_no_php(self):
+        # "Says nothing" must stay distinct from "no PHP": the first leaves the
+        # project to the other signals, the second settles it.
+        assert sg.scan_languages({"findings": 5, "total_time": 100}) is None
+        assert sg.scan_languages({}) is None
+
+    def test_scan_stats_reads_v1_and_returns_only_the_stats_object(self, monkeypatch):
+        calls = _pages(monkeypatch, [{"id": 5, "stats": {"parse_rate": {}}}])
+        assert sg.scan_stats(1234, "5", "tok") == {"parse_rate": {}}
+        assert calls[0]["url"].endswith("/api/v1/deployments/1234/scan/5")
+
+    def test_scan_stats_tolerates_a_missing_object(self, monkeypatch):
+        _pages(monkeypatch, [{"id": 5}])
+        assert sg.scan_stats(1, "5", "tok") == {}

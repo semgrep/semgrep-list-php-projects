@@ -4,7 +4,8 @@ Concept by **Jarkko Laemsae** (jarkko@semgrep.com), who originated the idea
 behind this tool.
 
 Lists the Semgrep projects that contain PHP, from the terminal, using the
-[Semgrep API v2](https://semgrep.dev/api/v2/openapi.yaml).
+[Semgrep API v2](https://semgrep.dev/api/v2/openapi.yaml) wherever v2 can
+answer, and two v1 scan endpoints where only v1 can.
 
 ```bash
 semgrep login                                    # or: export SEMGREP_APP_TOKEN=...
@@ -24,15 +25,23 @@ takes a list of projects.
 ## How PHP is detected
 
 The Semgrep API has no "languages" field on a project, a branch or a scan. PHP
-is detected from two signals instead, run in this order. The first narrows
-what the second has to cover:
+is detected from three signals instead, run in this order. Each one narrows
+what the next has to cover:
 
 | Signal | Source | Decides | Misses |
 |---|---|---|---|
+| `scans` | Latest full, completed Code scan: did Semgrep parse PHP files? | Yes **or no**, for every project with such a scan in the last 30 days | Projects with no full scan in 30 days |
 | `composer` | Supply Chain: Composer dependencies | Yes, in one fast call | PHP with no `composer.lock`; every project when the deployment has no Supply Chain |
-| `findings` | Code findings in `.php`, `.phtml`, `.php3`–`.php7` or `.phps` files, or from `php.*` rules, on each project's primary branch, in any status | Yes, for projects `composer` left undecided | PHP projects with no Code findings |
+| `findings` | Code findings in `.php`, `.phtml`, `.php3`–`.php7` or `.phps` files, or from `php.*` rules, on each project's primary branch, in any status | Yes, for projects the other two left undecided | PHP projects with no Code findings |
 
 Each project in the `json` and `csv` output says which signal found it.
+
+**How `scans` reads a scan** (checked against the live API on 2026-10-21): a
+scan's `stats.parse_rate` lists every language Semgrep parsed, with file counts.
+A project is PHP when `php` is listed with at least one file. The scan search
+only works per project, so this signal costs two small requests per project. If
+a scan ever comes back without `parse_rate`, the tool prints a warning naming
+the fields it did see, and `findings` decides that project instead.
 
 **Endpoints used** (checked against the live API on 2026-10-21):
 
@@ -40,18 +49,26 @@ Each project in the `json` and `csv` output says which signal found it.
 |---|---|
 | `GET /api/v2/deployments` | The deployment the token belongs to |
 | `POST /api/v2/deployments/{id}/projects/list` | Every non-archived project |
+| `POST /api/v1/deployments/{id}/scans/search` | Each project's latest full Code scan (v1, see below) |
+| `GET /api/v1/deployments/{id}/scan/{scanId}` | That scan's per-language statistics (v1, see below) |
 | `POST /api/sca/deployments/{id}/repositories` | Projects with Composer dependencies |
 | `POST /api/agent/deployments/{id}/issues` | Code findings, per batch of project ids |
+
+**Why two v1 endpoints remain.** The v2 scan object carries findings counts
+and enabled products but no per-language statistics, and nothing else in v2
+says what languages a project contains. Only the v1 scan read exposes
+`stats.parse_rate`, and `scans` is the one signal that can say "no PHP" with
+confidence. Dropping it would make a PHP project with no `composer.lock` and no
+Code findings invisible. The v1 search accepts the v2 project ids. When v2
+exposes per-language statistics, these two calls are the only thing to move.
 
 **Not every customer has Supply Chain.** If a signal's endpoint refuses with
 HTTP 403 or 404, the tool prints a warning, records it under `signalsSkipped`
 and answers from the other. Any other failure stops the run with exit `2`. A
 list built from half a findings walk would look complete when it is not.
 
-**A project no signal finds is not reported**, even if it contains PHP. A PHP
-project with no `composer.lock` and no Code findings on its primary branch is
-invisible to this tool. If you need certainty for a project that is not on the
-list, check its repository.
+**A project no signal finds is not reported**, even if it contains PHP. If you
+need certainty for a project that is not on the list, check its repository.
 
 **Why the file extension is checked here and not by the API.** The findings
 filter has a `filePaths` field, but it is a fuzzy text search with typo
@@ -134,11 +151,13 @@ docker run --rm -e SEMGREP_APP_TOKEN ghcr.io/semgrep/semgrep-list-php-projects:0
 Built for orgs with 10,000+ projects, while keeping load on the API low:
 
 - **The findings walk is a fallback, not a sweep.** It runs only for projects
-  that `composer` left undecided, filtered to their ids in batches of 100 and
-  read in pages of 3,000. No query pages deep through the deployment's whole
-  findings list. `projectsWalkedForFindings` in the JSON output says how many
-  projects needed it.
-- **Requests are sequential.** Nothing runs in parallel.
+  that `scans` and `composer` left undecided, filtered to their ids in batches
+  of 100 and read in pages of 3,000. No query pages deep through the
+  deployment's whole findings list. `projectsWalkedForFindings` in the JSON
+  output says how many projects needed it.
+- **Concurrency is capped.** The two scan requests per project run at most 4
+  at a time (`--concurrency`, 1 to 8). A 10,000-project org is about 20,000
+  small requests. The findings walk is always sequential.
 - **Transient failures are retried.** Rate limits (429, honouring
   `Retry-After`), 5xx, timeouts and dropped connections are retried with
   backoff, up to 6 attempts per request.
@@ -148,15 +167,17 @@ Built for orgs with 10,000+ projects, while keeping load on the API low:
 
 | Option | Default | |
 |---|---|---|
-| `--signals composer,findings` | both | Which signals to run |
+| `--signals scans,composer,findings` | all three | Which signals to run |
+| `--concurrency N` | `4` | Parallel scan lookups, 1 to 8 |
 | `--format text\|json\|csv` | `text` | `json` and `csv` add the project id, signals and counts |
 | `--base-url URL` | `https://semgrep.dev` | |
 
 ## What leaves the API
 
 Each Code finding is read only for its project name, file extension and rule
-name. Snippets, messages and file paths are never printed or stored. The output
-holds only project names, ids and counts.
+name. From each scan, only the per-language file counts are read. Snippets,
+messages and file paths are never printed or stored. The output holds only
+project names, ids and counts.
 
 ## Exit codes
 

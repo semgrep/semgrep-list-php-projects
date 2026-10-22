@@ -5,7 +5,21 @@ checked against the live API on 2026-10-21. Nothing in v2 says what languages a
 project contains: not the project (`protos.projects.v2.Project`), not the
 branch, and not the scan (`protos.scan.v2.Scan` carries findings counts and
 enabled products, but no per-language parse statistics). So PHP is detected
-from two signals the API does expose, cheapest first:
+from three signals, most direct first. The first still needs two v1 endpoints,
+because only the v1 scan object carries per-language statistics:
+
+    scans      POST /api/v1/deployments/{id}/scans/search  (full, Code, completed)
+               GET  /api/v1/deployments/{id}/scan/{scanId}
+               -> per-language parse statistics from each project's latest full
+               Code scan: did Semgrep parse PHP files in this repository? A full
+               scan, because a diff scan only sees the files a change touched.
+               `stats.parse_rate` maps language ids (`php`, `python`, ...) to
+               {num_targets, targets_parsed, num_bytes, bytes_parsed}. The
+               search takes one repository_id (the v2 project id works) and
+               returns newest first, so this is two small requests per project.
+               Covers only projects with a full scan in the last 30 days, the
+               search endpoint's window. This is the one signal that can say
+               "no PHP" with confidence, which spares the findings walk.
 
     composer   POST /api/sca/deployments/{id}/repositories
                with dependencyFilter.ecosystem = ["composer"]
@@ -17,8 +31,8 @@ from two signals the API does expose, cheapest first:
                with issueTypes = ["ISSUE_TYPE_SAST"]
                -> projects with at least one Code finding in a PHP file, or
                from a `php.*` rule. Cursor-paginated over large pages, so it
-               is the expensive one: it runs only for the projects Composer
-               left undecided, filtered to their ids in small batches so no
+               is the expensive one: it runs only for the projects the other
+               signals left undecided, filtered to their ids in batches so no
                query pages deep into the whole deployment's findings. The
                endpoint insists on a branch filter; `onPrimaryBranch` keeps it
                to each project's default branch. Every status is included
@@ -382,3 +396,86 @@ def php_issues(
         else:
             raise SemgrepError(f"issue listing did not end after {MAX_PAGES} pages")
     return counts
+
+
+# scans: the v1 endpoints, kept because v2 has no per-language statistics.
+
+def latest_full_scan(
+    deployment_id: int,
+    repository_id: int,
+    token: str,
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any] | None:
+    """A project's most recent completed, full, Code scan in the last 30 days.
+
+    Partial scans are excluded: a Supply Chain incident scan covers the whole
+    repository but runs only that incident's rules, so its statistics describe
+    a fraction of the code.
+
+    Measured on the live API, 2026-10-21: the search takes exactly one integer
+    `repository_id` -- no list, no deployment-wide search -- and returns scans
+    newest first, so `limit: 1` is the newest scan and one request suffices.
+    """
+    response = _request(
+        f"{base_url}/api/v1/deployments/{deployment_id}/scans/search", token,
+        method="POST",
+        body={
+            "deploymentId": str(deployment_id),
+            "repository_id": int(repository_id),
+            # The spec types this as an integer; the live API rejects 1 with
+            # "Expected true or false". It is a boolean.
+            "is_full_scan": True,
+            "is_partial_scan": False,
+            "statuses": ["SCAN_STATUS_COMPLETED"],
+            "products": ["PRODUCT_SAST"],
+            "limit": 1,
+        },
+    )
+    scans = [s for s in response.get("scans") or [] if s.get("id") not in (None, "")]
+    return scans[0] if scans else None
+
+
+def scan_stats(
+    deployment_id: int, scan_id: int | str, token: str, base_url: str = DEFAULT_BASE_URL
+) -> dict[str, Any]:
+    """The `stats` object of one scan; empty when the scan has none."""
+    response = _request(f"{base_url}/api/v1/deployments/{deployment_id}/scan/{scan_id}", token)
+    stats = response.get("stats")
+    return stats if isinstance(stats, dict) else {}
+
+
+# Where `semgrep ci` reports per-language parsing, and the per-language counts
+# it uses. The live API uses the snake_case names (2026-10-21); the camelCase
+# ones are kept so a protobuf JSON re-encoding degrades rather than breaks.
+_PARSE_RATE_KEYS = ("parse_rate", "parseRate")
+_TARGET_COUNT_KEYS = ("num_targets", "numTargets", "targets_parsed", "targetsParsed")
+
+
+def scan_languages(stats: dict[str, Any]) -> dict[str, int] | None:
+    """Language -> number of files of that language the scan targeted.
+
+    None when the stats carry no per-language data at all, which is different
+    from "no PHP": the scan says nothing either way, so the project stays
+    undecided and falls through to the other signals.
+    """
+    for key in _PARSE_RATE_KEYS:
+        rates = stats.get(key)
+        if isinstance(rates, dict):
+            break
+    else:
+        return None
+    languages: dict[str, int] = {}
+    for language, rate in rates.items():
+        count = None
+        if isinstance(rate, dict):
+            for count_key in _TARGET_COUNT_KEYS:
+                if isinstance(rate.get(count_key), (int, float)):
+                    count = int(rate[count_key])
+                    break
+        # A language listed with no recognisable count was still targeted.
+        languages[str(language).lower()] = count if count is not None else 1
+    return languages
+
+
+def php_files(languages: dict[str, int]) -> int:
+    return languages.get("php", 0)
