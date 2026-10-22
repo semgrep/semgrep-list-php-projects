@@ -30,13 +30,13 @@ def _issue(repo, path, rule="generic.rule", wrapped=True):
 
 
 class TestToken:
-    """Order: settings file, then SEMGREP_APP_TOKEN, then a prompt."""
+    """Order: SEMGREP_APP_TOKEN, then the settings file, then a prompt."""
 
-    def test_reads_the_settings_file_first(self, tmp_path):
+    def test_the_environment_beats_the_settings_file(self, tmp_path):
         settings = tmp_path / "settings.yml"
         settings.write_text("anonymous_user_id: abc\napi_token: from_file\n")
-        env = {"SEMGREP_APP_TOKEN": "from_env"}
-        assert sg.get_token(env, settings_file=settings, interactive=False) == "from_file"
+        env = {"SEMGREP_APP_TOKEN": " from_env "}
+        assert sg.get_token(env, settings_file=settings, interactive=False) == "from_env"
 
     def test_settings_file_path_comes_from_the_environment(self, tmp_path):
         settings = tmp_path / "elsewhere.yml"
@@ -60,10 +60,23 @@ class TestToken:
         settings.write_text(content)
         assert sg.settings_token(settings) is None
 
-    def test_falls_back_to_the_environment(self, tmp_path):
-        missing = tmp_path / "absent.yml"
-        env = {"SEMGREP_APP_TOKEN": " tok "}
-        assert sg.get_token(env, settings_file=missing, interactive=False) == "tok"
+    def test_falls_back_to_the_settings_file(self, tmp_path):
+        settings = tmp_path / "settings.yml"
+        settings.write_text("api_token: from_file\n")
+        env = {"SEMGREP_APP_TOKEN": "   "}
+        assert sg.get_token(env, settings_file=settings, interactive=False) == "from_file"
+
+    def test_resolve_token_reports_the_source(self, tmp_path):
+        settings = tmp_path / "settings.yml"
+        settings.write_text("api_token: from_file\n")
+        env = {"SEMGREP_APP_TOKEN": "from_env"}
+        assert sg.resolve_token(env, settings_file=settings, interactive=False) == (
+            "from_env", sg.SOURCE_ENV)
+        assert sg.resolve_token({}, settings_file=settings, interactive=False) == (
+            "from_file", sg.SOURCE_SETTINGS)
+        assert sg.resolve_token({}, settings_file=tmp_path / "absent.yml",
+                                prompt=lambda _: "typed", interactive=True) == (
+            "typed", sg.SOURCE_PROMPT)
 
     def test_prompts_on_a_terminal(self, tmp_path):
         prompts = []
@@ -105,7 +118,9 @@ class TestTokenNeverLeaks:
         with pytest.raises(sg.SemgrepError) as excinfo:
             sg._request("https://semgrep.dev/x", secret)
         assert secret not in str(excinfo.value)
-        # A CI token is the usual cause; the message should point at the scope.
+        # A CI token is the usual cause; the message should say the token was
+        # refused and point at the scope.
+        assert "not accepted" in str(excinfo.value)
         assert "Web API scope" in str(excinfo.value)
 
 

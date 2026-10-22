@@ -45,13 +45,14 @@ because only the v1 scan object carries per-language statistics:
                nonsense term then returned every finding in the deployment.
                The file extension is checked here instead.
 
-Not every customer has Supply Chain, so the CLI treats a signal whose product is
-not enabled as a warning and answers from the others.
+Not every customer has Supply Chain, so the CLI treats a refused `composer` as
+a warning and answers from the other signals. A refused `scans` or `findings`
+stops the run: the list would otherwise look complete when it is not.
 
 Every endpoint takes the Web API token (`SemgrepWebToken` in the spec). The
 token `semgrep login` stores has that scope; a CI-only (`agent_cli`) token gets
-401. The token comes from the semgrep settings file, then SEMGREP_APP_TOKEN,
-then a hidden prompt: see `get_token`.
+401. The token comes from SEMGREP_APP_TOKEN, then the semgrep settings file,
+then a hidden prompt: see `resolve_token`.
 
 Uses stdlib urllib rather than a HTTP client library, and a line scan rather
 than a YAML parser for the settings file: this runs with an API token, so every
@@ -137,18 +138,36 @@ def settings_token(path: str | os.PathLike[str]) -> str | None:
     return None
 
 
-def get_token(
+def settings_file_path(env: dict[str, str] | None = None) -> str:
+    env = env if env is not None else os.environ
+    return env.get(SETTINGS_FILE_ENV) or DEFAULT_SETTINGS_FILE
+
+
+# Where the token came from. The CLI reports it, because which org a run
+# queries depends on it, and because a `semgrep login` token is not granted
+# Web API access on every deployment (measured 2026-10-21: the same login token
+# gets 200 on one deployment's v1 endpoints and 404 on another's, where a
+# token created with the Web API scope gets 200).
+SOURCE_SETTINGS = "settings"
+SOURCE_ENV = "environment"
+SOURCE_PROMPT = "prompt"
+
+
+def resolve_token(
     env: dict[str, str] | None = None,
     settings_file: str | os.PathLike[str] | None = None,
     prompt: Callable[[str], str] | None = None,
     interactive: bool | None = None,
-) -> str:
-    """The API token, from the first of these that has one:
+) -> tuple[str, str]:
+    """(token, source), from the first of these that has one:
 
-    1. the semgrep CLI's settings file, `~/.semgrep/settings.yml`, which
+    1. the SEMGREP_APP_TOKEN environment variable;
+    2. the semgrep CLI's settings file, `~/.semgrep/settings.yml`, which
        `semgrep login` writes (SEMGREP_SETTINGS_FILE overrides the path);
-    2. the SEMGREP_APP_TOKEN environment variable;
     3. a prompt on the terminal, with input hidden.
+
+    The environment wins, as is usual, so a token exported for one run
+    overrides a login without touching the settings file.
 
     Without a terminal there is nothing to prompt, so that is an error. The
     token is never accepted as a command-line argument: it would land in shell
@@ -157,28 +176,38 @@ def get_token(
     `settings_file`, `prompt` and `interactive` exist for tests.
     """
     env = env if env is not None else os.environ
-    if settings_file is None:
-        settings_file = env.get(SETTINGS_FILE_ENV) or DEFAULT_SETTINGS_FILE
-    token = settings_token(settings_file)
-    if token:
-        return token
     token = (env.get(TOKEN_ENV) or "").strip()
     if token:
-        return token
+        return token, SOURCE_ENV
+    if settings_file is None:
+        settings_file = settings_file_path(env)
+    token = settings_token(settings_file)
+    if token:
+        return token, SOURCE_SETTINGS
     if interactive is None:
         interactive = sys.stdin.isatty()
     if not interactive:
         raise SemgrepError(
-            f"no API token found: {settings_file} has no api_token and {TOKEN_ENV} "
-            "is not set. Run `semgrep login`, or export a token with the Web API "
-            "scope. It is never accepted as a command-line argument."
+            f"no API token found: {TOKEN_ENV} is not set and {settings_file} has "
+            "no api_token. Export a token with the Web API scope, or run "
+            "`semgrep login`. It is never accepted as a command-line argument."
         )
     # getpass reads from the terminal, not stdin, and hides the input, so this
     # works even when stdout is redirected to a file.
     token = (prompt or getpass.getpass)("Semgrep API token (Web API scope; hidden): ").strip()
     if not token:
         raise SemgrepError("no token entered")
-    return token
+    return token, SOURCE_PROMPT
+
+
+def get_token(
+    env: dict[str, str] | None = None,
+    settings_file: str | os.PathLike[str] | None = None,
+    prompt: Callable[[str], str] | None = None,
+    interactive: bool | None = None,
+) -> str:
+    """The token alone; see `resolve_token`."""
+    return resolve_token(env, settings_file, prompt, interactive)[0]
 
 
 def _retry_delay(attempt: int, retry_after: str | None) -> float:
@@ -230,8 +259,12 @@ def _request(
             except Exception:  # noqa: BLE001 - best effort only
                 detail = ""
             hint = ""
-            if exc.code in (401, 403):
-                hint = " (check that the token has the Web API scope; a CI-only token does not)"
+            if exc.code == 401:
+                hint = (" (the token was not accepted: it needs the Web API scope, "
+                        "which a CI-only token does not have)")
+            elif exc.code == 403:
+                hint = (" (the token is not permitted to use this endpoint: it needs "
+                        "the Web API scope on this deployment)")
             tries = f" after {attempt + 1} attempts" if attempt else ""
             raise SemgrepError(
                 f"{method} {url} failed{tries}: HTTP {exc.code}{hint} {detail}",

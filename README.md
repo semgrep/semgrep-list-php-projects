@@ -62,10 +62,14 @@ confidence. Dropping it would make a PHP project with no `composer.lock` and no
 Code findings invisible. The v1 search accepts the v2 project ids. When v2
 exposes per-language statistics, these two calls are the only thing to move.
 
-**Not every customer has Supply Chain.** If a signal's endpoint refuses with
-HTTP 403 or 404, the tool prints a warning, records it under `signalsSkipped`
-and answers from the other. Any other failure stops the run with exit `2`. A
-list built from half a findings walk would look complete when it is not.
+**Not every customer has Supply Chain.** If the `composer` endpoint refuses
+with HTTP 403 or 404, the tool prints a warning, records it under
+`signalsSkipped` and answers from the other signals. The same statuses also
+appear when the token is not granted Web API access on the deployment (see
+[The token](#the-token)), so the warning says both. From `scans` or `findings`
+those statuses stop the run with exit `2`, as does any other failure: a list
+built without `scans`, or from half a findings walk, would look complete when
+it is not.
 
 **A project no signal finds is not reported**, even if it contains PHP. If you
 need certainty for a project that is not on the list, check its repository.
@@ -123,9 +127,10 @@ The PyPI release carries PEP 740 attestations, shown on each file at
 The tool looks for a Semgrep API token in this order and uses the first it
 finds:
 
-1. **`~/.semgrep/settings.yml`**, which `semgrep login` writes. Set
+1. **`SEMGREP_APP_TOKEN`** in the environment. It wins over the settings
+   file, so you can run once with another token without logging out.
+2. **`~/.semgrep/settings.yml`**, which `semgrep login` writes. Set
    `SEMGREP_SETTINGS_FILE` to use another path, as with the semgrep CLI.
-2. **`SEMGREP_APP_TOKEN`** in the environment.
 3. **A prompt**, with input hidden, when run from a terminal. Without a
    terminal (CI, a pipe) there is nothing to prompt, so that is an error.
 
@@ -133,12 +138,32 @@ The token is never accepted as a command-line argument, so it stays out of
 shell history and `ps`. It is never logged or written to disk. The token decides
 the deployment, so you never pass one.
 
-The token needs the **Web API** scope. The token `semgrep login` creates has
-it. A CI-only token (the `agent_cli` scope) gets HTTP 401 here, and the error
-says so.
+The token needs the **Web API** scope. A CI-only token (the `agent_cli`
+scope) gets HTTP 401 here, and the error says so.
 
-In Docker, the wrapper script mounts the settings file read-only and forwards
-`SEMGREP_APP_TOKEN` by name. Without the wrapper, pass one of:
+**The `semgrep login` token is not enough on every deployment.** Measured on
+2026-10-21: the same login token reaches every endpoint on a recently created
+deployment and gets HTTP 404 from the v1 and scan endpoints on an older one,
+where a token created with the Web API scope gets 200. When that happens the
+tool stops at the `scans` signal with exit `2` and says why. The fix is a token
+with the Web API scope from Settings > Tokens in the Semgrep app, exported as
+`SEMGREP_APP_TOKEN`. It overrides the login, so there is no need to log out:
+
+```bash
+SEMGREP_APP_TOKEN=... semgrep-list-php-projects
+```
+
+The reverse also happens: `SEMGREP_APP_TOKEN` is the variable `semgrep ci`
+reads, so a CI token left exported in a shell overrides a working login and
+every call gets HTTP 401. When the token came from the environment and the
+settings file also holds one, the error says to unset the variable.
+
+Every run starts by saying where its token came from (never the token), so a
+log always shows which login an org list belongs to.
+
+In Docker, the wrapper script forwards `SEMGREP_APP_TOKEN` by name when it is
+set, and otherwise mounts the settings file read-only. Without the wrapper,
+pass one of:
 
 ```bash
 docker run --rm -v ~/.semgrep/settings.yml:/run/semgrep/settings.yml:ro \
